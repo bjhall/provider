@@ -14,36 +14,41 @@ my %data = &get_base_freqs_from_bams( \%file_data, $SNPBED_PATH );
 
 &do_genotyping( \%data );
 
-&print_genotype_table( \%data );
+&print_genotype_table( \%data, $opt{out} );
 
 
 
 ########################
 
 sub print_genotype_table{
-    my $data = shift;
+    my( $data, $out ) = @_;
 
-    print "loc";
-    print "\t$_" foreach sort keys %{ ((values %data)[0])->{samples} };
-    print "\n";
+    open (GT, ">".$out.".genotypes");
 
+    print GT "loc";
+    print GT "\t$_" foreach sort keys %{ ((values %data)[0])->{samples} };
+    print GT "\n";
+  
     my ($tot_callable, $tot_sites, $HW_pass, $tot_loc);
     foreach my $loc ( sort keys %$data ) {
-	print $loc;
+	print GT $loc;
 	foreach my $sid ( sort keys %{ $data->{$loc}->{samples} } ) {
 	    my $genotype = $data{$loc}->{samples}->{$sid}->{gt};
-	    print "\t";
-	    print defined( $genotype ) ? $genotype : "NA";
+	    print GT "\t";
+	    print GT defined( $genotype ) ? $genotype : "NA";
 	}
-	print "\n";
+	print GT "\n";
 	$tot_callable += $data->{$loc}->{Ncallable};
 	$tot_sites    += $data->{$loc}->{Ntotal};
 	$HW_pass      += $data->{$loc}->{HW};
 	$tot_loc      ++;
     }   
+    close GT;
 
-    printf STDERR "Average callability: %.2f%%\nSites in H-W equilibrium: %d / %d\n", 100*($tot_callable/$tot_sites),
-                                                                                             $HW_pass, $tot_loc;
+    open (STATS, ">".$out.".stats");
+    printf STATS "Average callability: %.2f%%\nSites in H-W equilibrium: %d / %d\n", 100*($tot_callable/$tot_sites),
+                                                                                     $HW_pass, $tot_loc;
+    close STATS;
 }
 
 
@@ -85,13 +90,11 @@ sub do_genotyping{
 	}
 	$data->{$loc}->{Ntotal} = $num_samples;
 
-
 	# Skipping tri-allelic sites
 	if (keys %gt_cnt > 3) {
 	    print STDERR "Skipping $loc: More than more than 2 alleles detected!\n";
 	    next;
 	}
-
 
 	# Assign genotypes to 0,1,2 (0 = common homozygote, 1 = heterozygote, 2 = rare homozygote)
 	my $first = 1;
@@ -108,7 +111,6 @@ sub do_genotyping{
 	    $gt_cnt{ $num{$gtype} }= $gt_cnt{ $gtype };
 	}
 
-
 	# Add 0,1,2 genotypes to hash
 	foreach my $sid (keys %{$data->{$loc}->{samples}}) {
 	    my $call = $data->{$loc}->{samples}->{$sid}->{basecall};
@@ -116,7 +118,6 @@ sub do_genotyping{
 		$data->{$loc}->{samples}->{$sid}->{gt} = $num{ $call }
 	    }
 	}
-
 
 	# Check for Hardy-Weinberg equilibrium
 	my ($AA, $AB, $BB) = ( ($gt_cnt{0} or 0), ($gt_cnt{1} or 0), ($gt_cnt{2} or 0) );
@@ -130,17 +131,21 @@ sub do_genotyping{
 sub get_base_freqs_from_bams{
     my( $file_data, $snp_fn ) = @_;
 
-    if ($opt{restart} or !-s "pile.tmp") {
+    my $pile_out = $opt{out}.".pile.tmp";
+
+    if( $opt{restart} or !-s $pile_out ) {
 	print STDERR "Piling up...";
-	system( $SAMTOOLS_PATH." mpileup -l ". $snp_fn." ". join( " ", sort keys %$file_data )." > pile.tmp 2> mpileup.log" );
+	system( $SAMTOOLS_PATH." mpileup -l ". $snp_fn." ". join( " ", sort keys %$file_data ).
+		" > $pile_out 2> $opt{out}.mpileup.log" );
+	print STDERR " Done\n";
     }
     else {
-	print STDERR "WARNING: Prior pileup file found, continuing using this. Use --restart to override\n";
+	print STDERR "WARNING: Prior pileup file found, resuming with that file. Use --restart to override\n";
     }
 
     my %frq;
 
-    open( PILE, "pile.tmp" );
+    open( PILE, $pile_out );
     while (<PILE>) {
 	my @p = split /\t/;
 	my $loc = $p[0].":".$p[1];
@@ -158,6 +163,7 @@ sub get_base_freqs_from_bams{
     return %frq
 }
 
+
 # FIXME: Use qual string and parse base string properly...
 sub count_bases{
     my ($b, $q) = @_;
@@ -168,15 +174,23 @@ sub count_bases{
     return {'A'=>$a, 'C'=>$c, 'G'=>$g, 'T'=>$t};
 }
 
+
+# Parse and check command line options
 sub get_options{
     my %opt;
-    GetOptions( \%opt, 'bam=s', 'bed=s', 'nocheck', 'restart' );
+    GetOptions( \%opt, 'bam=s', 'bed=s', 'nocheck', 'restart', 'out=s' );
     error( "Parameter --bam required", 1 ) unless $opt{bam};
     error( "Bed file $opt{bed} does not exist.", 1 ) if $opt{bed} and !-s $opt{bed};
+    error( "Parameter --out required.", 1 ) unless $opt{out};
+
+    if (!$opt{restart} and ( -s $opt{out}.".genotypes" or -s $opt{out}.".stats" ) ) {
+	error( "Output with prefix $opt{out} already exists. Use --restart to overwrite.", 1 );
+    }
     return %opt;
 }
 
 
+# Get BAM file names from file mask or metadata file.
 sub get_bampaths{
     my ($mask, $nocheck) = @_;
 
@@ -216,6 +230,7 @@ sub get_bampaths{
 }
 
 
+# Parse meta data file
 sub read_sample_metadata{
     my($fn, $nocheck ) = @_;
     
@@ -233,6 +248,7 @@ sub read_sample_metadata{
 	    my $name = ($dat[1] or "unknown".++$cnt);
 	    $files{ $dat[0] }->{ name } = $name;
 	    $files{ $dat[0] }->{ individual } = $name if $dat[2];
+	    $files{ $dat[0] }->{ sex } = $name if $dat[3];
 	}
 	else {
 	    error( "ERROR: File not found '$dat[0]'", 1 );
@@ -242,6 +258,7 @@ sub read_sample_metadata{
 }
 
 
+# Perform chi2test for Hardy-Weinberg equilibrium
 sub HW_chi2test {
     my ($AA, $AB, $BB) = @_;
 
@@ -265,6 +282,7 @@ sub HW_chi2test {
 }
 
 
+# Prints error and quits program
 sub error{
     print $_[0]."\n";
     exit $_[1];
