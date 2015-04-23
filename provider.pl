@@ -132,7 +132,7 @@ sub get_base_freqs_from_bams{
 
     if ($opt{restart} or !-s "pile.tmp") {
 	print STDERR "Piling up...";
-	system( $SAMTOOLS_PATH." mpileup -l ". $snp_fn." ". join( " ", sort keys %$file_data )." > pile.tmp 2> /dev/null" );
+	system( $SAMTOOLS_PATH." mpileup -l ". $snp_fn." ". join( " ", sort keys %$file_data )." > pile.tmp 2> mpileup.log" );
     }
     else {
 	print STDERR "WARNING: Prior pileup file found, continuing using this. Use --restart to override\n";
