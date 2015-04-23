@@ -122,7 +122,8 @@ sub do_genotyping{
 	my ($AA, $AB, $BB) = ( ($gt_cnt{0} or 0), ($gt_cnt{1} or 0), ($gt_cnt{2} or 0) );
 	my $hw_eq = HW_chi2test( $AA, $AB, $BB );
 	$data{$loc}->{HW}        = $hw_eq;
-	$data{$loc}->{Ncallable} = $AA+$AB+$BB;
+	$data{$loc}->{Ncallable} = $AA + $AB + $BB;
+	$data{$loc}->{MAF}       = $AB + 2 * $BB;
     }   
 }
 
