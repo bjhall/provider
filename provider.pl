@@ -3,22 +3,54 @@ use strict;
 use Getopt::Long;
 use Data::Dumper;
 
-my %opt = &get_options;
-
 my $SAMTOOLS_PATH = "samtools";
-my $SNPBED_PATH = ($opt{bed} or "HPA_1000G_final_38.bed");
+my $DEFAULT_SNPBED = "HPA_1000G_final_38.bed";
 
+my %opt = &get_options;
 my %file_data = &get_bampaths( $opt{bam}, $opt{nocheck} );
 
-my %data = &get_base_freqs_from_bams( \%file_data, $SNPBED_PATH );
+unless ( $opt{ nocheck } or &matching_chr_names( (keys %file_data)[0], $opt{bed} ) ) {
+    error( "Chromosome names do not match between BED and BAMs", 1 );
+}
+
+
+my %data = &get_base_freqs_from_bams( \%file_data, $opt{bed} );
 
 &do_genotyping( \%data );
-
 &print_genotype_table( \%data, $opt{out} );
-
+&find_matching_samples( \%data, \%file_data );
 
 
 ########################
+
+sub find_matching_samples{
+    my( $data, $file_data ) = @_;
+
+    my %dist;
+    foreach my $samp1 ( keys %$file_data ) {
+	my $name1 = $file_data{$samp1}->{name};
+	foreach my $samp2 (keys %$file_data) {
+	    next if $samp1 eq $samp2;
+	    my $name2 = $file_data{$samp2}->{name};
+	    $dist{$name1}->{$name2} = distance( $data, $name1, $name2 );
+	    print "$name1\t$name2\t".$dist{$name1}->{$name2}."\n";
+	}
+    }
+}
+
+sub distance{
+    my( $data, $id1, $id2 ) = @_;
+
+    my ( $identical, $tot ) = ( 0, 0 );
+    foreach my $loc (keys %$data) {
+	if( defined($data{$loc}->{samples}->{$id1}->{gt}) and defined($data{$loc}->{samples}->{$id2}->{gt}) ) {
+	    $identical++ if $data{$loc}->{samples}->{$id1}->{gt} eq $data{$loc}->{samples}->{$id2}->{gt};
+	    $tot++;
+	}
+    }
+
+    return ($tot-$identical) / $tot;
+}
 
 sub print_genotype_table{
     my( $data, $out ) = @_;
@@ -71,10 +103,10 @@ sub do_genotyping{
 	    if ($f{$max} >= 6) {
 		my $ap = ($f{$max} - $f{$second}) / $tot;
 	
-		if ($ap < 0.6) {
+		if ($ap < 0.6) { # Heterozygote
 		    $gt = join "/", sort( $max,$second );
 		}
-		elsif ($ap > 0.9) {
+		elsif ($ap > 0.9) { # Homozygote
 		    $gt = $max;
 		}
 		else {
@@ -108,7 +140,7 @@ sub do_genotyping{
 		$num{$gtype} = 2 if !$first;
 		$first = 0;
 	    }
-	    $gt_cnt{ $num{$gtype} }= $gt_cnt{ $gtype };
+	    $gt_cnt{ $num{$gtype} } = $gt_cnt{ $gtype };
 	}
 
 	# Add 0,1,2 genotypes to hash
@@ -121,8 +153,7 @@ sub do_genotyping{
 
 	# Check for Hardy-Weinberg equilibrium
 	my ($AA, $AB, $BB) = ( ($gt_cnt{0} or 0), ($gt_cnt{1} or 0), ($gt_cnt{2} or 0) );
-	my $hw_eq = HW_chi2test( $AA, $AB, $BB );
-	$data{$loc}->{HW}        = $hw_eq;
+	$data{$loc}->{HW}        = HW_chi2test( $AA, $AB, $BB );
 	$data{$loc}->{Ncallable} = $AA + $AB + $BB;
 	$data{$loc}->{MAF}       = $AB + 2 * $BB;
     }   
@@ -133,14 +164,14 @@ sub get_base_freqs_from_bams{
 
     my $pile_out = $opt{out}.".pile.tmp";
 
-    if( $opt{restart} or !-s $pile_out ) {
+    if( $opt{overwrite} or !-s $pile_out ) {
 	print STDERR "Piling up...";
 	system( $SAMTOOLS_PATH." mpileup -l ". $snp_fn." ". join( " ", sort keys %$file_data ).
 		" > $pile_out 2> $opt{out}.mpileup.log" );
 	print STDERR " Done\n";
     }
     else {
-	print STDERR "WARNING: Prior pileup file found, resuming with that file. Use --restart to override\n";
+	print STDERR "WARNING: Prior pileup file found, resuming with that file. Use --overwrite to override\n";
     }
 
     my %frq;
@@ -177,18 +208,33 @@ sub count_bases{
 
 # Parse and check command line options
 sub get_options{
-    my %opt;
-    GetOptions( \%opt, 'bam=s', 'bed=s', 'nocheck', 'restart', 'out=s' );
-    error( "Parameter --bam required", 1 ) unless $opt{bam};
+    my %opt = ( 'bed' => $DEFAULT_SNPBED );
+    GetOptions( \%opt, 'bam=s', 'bed=s', 'nocheck', 'overwrite', 'out=s' );
+    error( "Parameter --bam required", 1, 1 ) unless $opt{bam};
     error( "Bed file $opt{bed} does not exist.", 1 ) if $opt{bed} and !-s $opt{bed};
-    error( "Parameter --out required.", 1 ) unless $opt{out};
+    error( "Parameter --out required.", 1, 1 ) unless $opt{out};
 
-    if (!$opt{restart} and ( -s $opt{out}.".genotypes" or -s $opt{out}.".stats" ) ) {
-	error( "Output with prefix $opt{out} already exists. Use --restart to overwrite.", 1 );
+    if (!$opt{overwrite} and ( -s $opt{out}.".genotypes" or -s $opt{out}.".stats" ) ) {
+	error( "Output with prefix $opt{out} already exists. Use --overwrite to overwrite.", 1 );
     }
     return %opt;
 }
 
+sub display_usage{
+    print "provider.pl --bam [METADATA FILE|'FILEMASK'] --out OUT_FILE_PREFIX\n";
+
+    print " REQUIRED\n".
+	  "   --bam        Either the path to a metadata file listing bam files\n".
+	  "                or a filemask for bam files\n".
+	  "   --out        Prefix of output files\n".
+	  " OPTIONAL:\n".
+	  "   --bed        Path to BED file of SNPs to use for finger printing\n".
+	  "                Default: $DEFAULT_SNPBED\n".
+	  "   --overwrite  Overwrite any existing files with same file prefix\n".
+          "                Default: OFF\n".
+	  "   --nocheck    Don't check if files exist or if chromosomes match.\n".
+	  "                Default: OFF\n\n";
+}
 
 # Get BAM file names from file mask or metadata file.
 sub get_bampaths{
@@ -282,9 +328,38 @@ sub HW_chi2test {
 }
 
 
+# Check if all the chromosome names in the BED file are present in the BAM
+sub matching_chr_names {
+    my ($bam, $bed) = @_;
+    my (%bam_chr, %bed_chr);
+
+    my @header = `$SAMTOOLS_PATH view -H $bam`;
+    foreach (@header) {
+	if( /^\@SQ/ ) {
+	    my ($name) = ( $_ =~ /\tSN:(.*?)\t/ );
+	    $bam_chr{$name} = 1;
+	}
+    }
+
+    open( BED, $bed );
+    while( <BED> ) {
+	my @a = split /\t/;
+	$bed_chr{$a[0]} = 1;
+    }
+
+    foreach my $chr (keys %bed_chr) {
+	return 0 unless $bam_chr{ $chr };
+    }
+
+    return 1;
+}
+
+
 # Prints error and quits program
 sub error{
-    print $_[0]."\n";
+    my ($msg, $error_code, $print_usage) = @_;
+    print STDERR "***** ERROR: $_[0] *****\n\n";
+    &display_usage if $print_usage;
     exit $_[1];
 }
 
