@@ -5,6 +5,8 @@ use Data::Dumper;
 
 my $SAMTOOLS_PATH = "samtools";
 my $DEFAULT_SNPBED = "HPA_1000G_final_38.bed";
+my $MALE_REGION_37 = "Y:2712190";
+my $MALE_REGION_38 = "Y:2844077-2844257";
 
 my %opt = &get_options;
 my %file_data = &get_bampaths( $opt{bam}, $opt{nocheck} );
@@ -17,8 +19,9 @@ unless ( $opt{ nocheck } or &matching_chr_names( (keys %file_data)[0], $opt{bed}
 my %data = &get_base_freqs_from_bams( \%file_data, $opt{bed} );
 
 &do_genotyping( \%data );
+
 &print_genotype_table( \%data, $opt{out} );
-&find_matching_samples( \%data, \%file_data );
+#&find_matching_samples( \%data, \%file_data );
 
 
 ########################
@@ -32,8 +35,10 @@ sub find_matching_samples{
 	foreach my $samp2 (keys %$file_data) {
 	    next if $samp1 eq $samp2;
 	    my $name2 = $file_data{$samp2}->{name};
-	    $dist{$name1}->{$name2} = distance( $data, $name1, $name2 );
-	    print "$name1\t$name2\t".$dist{$name1}->{$name2}."\n";
+	    unless (defined( $dist{$name2}->{$name1} )) {
+		$dist{$name1}->{$name2} = distance( $data, $name1, $name2 );
+		print "$name1\t$name2\t".$dist{$name1}->{$name2}."\n";
+	    }
 	}
     }
 }
@@ -57,19 +62,21 @@ sub print_genotype_table{
 
     open (GT, ">".$out.".genotypes");
 
-    print GT "loc";
-    print GT "\t$_" foreach sort keys %{ ((values %data)[0])->{samples} };
-    print GT "\n";
+    if( ! $opt{'long'} ) {
+	print GT "loc";
+	print GT "\t$_" foreach sort keys %{ ((values %data)[0])->{samples} };
+	print GT "\n";
+    }
   
     my ($tot_callable, $tot_sites, $HW_pass, $tot_loc);
     foreach my $loc ( sort keys %$data ) {
-	print GT $loc;
+	print GT $loc if ! $opt{long};
 	foreach my $sid ( sort keys %{ $data->{$loc}->{samples} } ) {
 	    my $genotype = $data{$loc}->{samples}->{$sid}->{gt};
-	    print GT "\t";
-	    print GT defined( $genotype ) ? $genotype : "NA";
+	    print GT "\t". ( defined( $genotype ) ? $genotype : "NA" ) if ! $opt{long};
+	    print GT "$sid\t$loc\t". ( defined( $genotype ) ? $genotype : "NA" ) ."\n" if $opt{long};
 	}
-	print GT "\n";
+	print GT "\n" if ! $opt{long};
 	$tot_callable += $data->{$loc}->{Ncallable};
 	$tot_sites    += $data->{$loc}->{Ntotal};
 	$HW_pass      += $data->{$loc}->{HW};
@@ -198,18 +205,23 @@ sub get_base_freqs_from_bams{
 # FIXME: Use qual string and parse base string properly...
 sub count_bases{
     my ($b, $q) = @_;
-    my $a = ($b =~ s/A/A/gi);
-    my $t = ($b =~ s/T/T/gi);
-    my $g = ($b =~ s/G/G/gi);
-    my $c = ($b =~ s/C/C/gi);
-    return {'A'=>$a, 'C'=>$c, 'G'=>$g, 'T'=>$t};
+    if ($b) {
+	my $a = ($b =~ s/A/A/gi);
+	my $t = ($b =~ s/T/T/gi);
+	my $g = ($b =~ s/G/G/gi);
+	my $c = ($b =~ s/C/C/gi);
+	return {'A'=>$a, 'C'=>$c, 'G'=>$g, 'T'=>$t};
+    }
+    else {
+	return {'A'=>0, 'C'=>0, 'G'=>0, 'T'=>0};
+    }
 }
 
 
 # Parse and check command line options
 sub get_options{
     my %opt = ( 'bed' => $DEFAULT_SNPBED );
-    GetOptions( \%opt, 'bam=s', 'bed=s', 'nocheck', 'overwrite', 'out=s' );
+    GetOptions( \%opt, 'bam=s', 'bed=s', 'nocheck', 'overwrite', 'out=s', 'threads=i', 'long' );
     error( "Parameter --bam required", 1, 1 ) unless $opt{bam};
     error( "Bed file $opt{bed} does not exist.", 1 ) if $opt{bed} and !-s $opt{bed};
     error( "Parameter --out required.", 1, 1 ) unless $opt{out};
@@ -220,6 +232,8 @@ sub get_options{
     return %opt;
 }
 
+
+# Display help text
 sub display_usage{
     print "provider.pl --bam [METADATA FILE|'FILEMASK'] --out OUT_FILE_PREFIX\n";
 
@@ -233,6 +247,8 @@ sub display_usage{
 	  "   --overwrite  Overwrite any existing files with same file prefix\n".
           "                Default: OFF\n".
 	  "   --nocheck    Don't check if files exist or if chromosomes match.\n".
+	  "                Default: OFF\n\n";
+	  "   --long       Output genotypes in Plink long-format\n".
 	  "                Default: OFF\n\n";
 }
 
@@ -358,7 +374,7 @@ sub matching_chr_names {
 # Prints error and quits program
 sub error{
     my ($msg, $error_code, $print_usage) = @_;
-    print STDERR "***** ERROR: $_[0] *****\n\n";
+    print STDERR "*** ERROR: $_[0] ***\n\n";
     &display_usage if $print_usage;
     exit $_[1];
 }
