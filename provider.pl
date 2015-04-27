@@ -74,7 +74,7 @@ sub print_genotype_table{
 	foreach my $sid ( sort keys %{ $data->{$loc}->{samples} } ) {
 	    my $genotype = $data{$loc}->{samples}->{$sid}->{gt};
 	    print GT "\t". ( defined( $genotype ) ? $genotype : "NA" ) if ! $opt{long};
-	    print GT "$sid\t$loc\t". ( defined( $genotype ) ? $genotype : "NA" ) ."\n" if $opt{long};
+	    print GT "$sid\t$sid\t$loc\t". plink_gt( $data{$loc}->{samples}->{$sid}->{basecall} ) ."\n" if $opt{long};
 	}
 	print GT "\n" if ! $opt{long};
 	$tot_callable += $data->{$loc}->{Ncallable};
@@ -90,6 +90,15 @@ sub print_genotype_table{
     close STATS;
 }
 
+
+sub plink_gt{
+    my $bc = shift;
+    return "0\t0" if !defined($bc) or $bc eq "unclear" or $bc eq "lowdata" ;
+    return "$bc\t$bc" if length($bc) == 1;
+    my ($a1, $a2) = split /\//, $bc;
+    return "$a1\t$a1";
+}
+ 
 
 sub do_genotyping{
     my $data = shift;
@@ -248,7 +257,7 @@ sub display_usage{
           "                Default: OFF\n".
 	  "   --nocheck    Don't check if files exist or if chromosomes match.\n".
 	  "                Default: OFF\n\n";
-	  "   --long       Output genotypes in Plink long-format\n".
+	  "   --long       Output genotypes in long format: sampleID[TAB]snpID[TAB]genotype\n".
 	  "                Default: OFF\n\n";
 }
 
