@@ -10,6 +10,7 @@ my $MALE_REGION_38 = "Y:2844077-2844257";
 
 my %opt = &get_options;
 my %file_data = &get_bampaths( $opt{bam}, $opt{nocheck} );
+my %variant_data = &read_bed( $opt{bed} );
 
 unless ( $opt{ nocheck } or &matching_chr_names( (keys %file_data)[0], $opt{bed} ) ) {
     error( "Chromosome names do not match between BED and BAMs", 1 );
@@ -57,6 +58,18 @@ sub distance{
     return ($tot-$identical) / $tot;
 }
 
+sub read_bed{
+    my $bed = shift;
+    open( BED, $bed );
+    my %var;
+    while( <BED> ) {
+	chomp;
+	my( $chr, $p0, $p1, $id ) = split /\t/;
+	$var{$chr.":".$p1} = $id;
+    }
+    return %var;
+}
+
 sub print_genotype_table{
     my( $data, $out ) = @_;
 
@@ -70,12 +83,22 @@ sub print_genotype_table{
   
     my ($tot_callable, $tot_sites, $HW_pass, $tot_loc);
     foreach my $loc ( sort keys %$data ) {
-	print GT $loc if ! $opt{long};
+	my $snp_id = $opt{position} ? $loc : $variant_data{$loc};
+
+	print GT $snp_id if ! $opt{long};
+
 	foreach my $sid ( sort keys %{ $data->{$loc}->{samples} } ) {
 	    my $genotype = $data{$loc}->{samples}->{$sid}->{gt};
-	    print GT "\t". ( defined( $genotype ) ? $genotype : "NA" ) if ! $opt{long};
-	    print GT "$sid\t$sid\t$loc\t". plink_gt( $data{$loc}->{samples}->{$sid}->{basecall} ) ."\n" if $opt{long};
+
+	    if( $opt{long} ) {
+		print GT "$sid\t$sid\t".$snp_id."\t". 
+		         plink_gt( $data{$loc}->{samples}->{$sid}->{basecall} ) ."\n";
+	    }
+	    else {
+		print GT "\t". ( defined( $genotype ) ? $genotype : "NA" ) if ! $opt{long};
+	    }
 	}
+
 	print GT "\n" if ! $opt{long};
 	$tot_callable += $data->{$loc}->{Ncallable};
 	$tot_sites    += $data->{$loc}->{Ntotal};
@@ -230,7 +253,8 @@ sub count_bases{
 # Parse and check command line options
 sub get_options{
     my %opt = ( 'bed' => $DEFAULT_SNPBED );
-    GetOptions( \%opt, 'bam=s', 'bed=s', 'nocheck', 'overwrite', 'out=s', 'threads=i', 'long' );
+    GetOptions( \%opt, 'bam=s', 'bed=s', 'nocheck', 'overwrite', 'out=s', 
+		'threads=i', 'long', 'position' );
     error( "Parameter --bam required", 1, 1 ) unless $opt{bam};
     error( "Bed file $opt{bed} does not exist.", 1 ) if $opt{bed} and !-s $opt{bed};
     error( "Parameter --out required.", 1, 1 ) unless $opt{out};
@@ -256,8 +280,10 @@ sub display_usage{
 	  "   --overwrite  Overwrite any existing files with same file prefix\n".
           "                Default: OFF\n".
 	  "   --nocheck    Don't check if files exist or if chromosomes match.\n".
-	  "                Default: OFF\n\n";
+	  "                Default: OFF\n".
 	  "   --long       Output genotypes in long format: sampleID[TAB]snpID[TAB]genotype\n".
+	  "                Default: OFF\n".
+	  "   --position   Output genomic position as identifier instead of rsID\n".
 	  "                Default: OFF\n\n";
 }
 
