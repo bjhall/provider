@@ -5,23 +5,27 @@ use Data::Dumper;
 
 my $SAMTOOLS_PATH = "samtools";
 my $DEFAULT_SNPBED = "HPA_1000G_final_38.bed";
-my $MALE_REGION_37 = "Y:2712190";
-my $MALE_REGION_38 = "Y:2844077-2844257";
+my $DEFAULT_XYBED  = "xy_38.bed";
 
 my %opt = &get_options;
 my %file_data = &get_bampaths( $opt{bam}, $opt{nocheck} );
 my %variant_data = &read_bed( $opt{bed} );
+my %xy_data;
+if ( $opt{ bedxy } ) {
+    %xy_data = &read_bed( $opt{bedxy} );
+}
 
 unless ( $opt{ nocheck } or &matching_chr_names( (keys %file_data)[0], $opt{bed} ) ) {
     error( "Chromosome names do not match between BED and BAMs", 1 );
 }
 
+my %data = &get_base_freqs_from_bams( \%file_data, $opt{bed}, $opt{bedxy} );
 
-my %data = &get_base_freqs_from_bams( \%file_data, $opt{bed} );
+my %samples = &determine_sex( \%data, \%xy_data );
+&do_genotyping( \%data, \%variant_data );
 
-&do_genotyping( \%data );
+&print_genotype_table( \%data, \%samples, $opt{out} );
 
-&print_genotype_table( \%data, $opt{out} );
 #&find_matching_samples( \%data, \%file_data );
 
 
@@ -64,35 +68,40 @@ sub read_bed{
     my %var;
     while( <BED> ) {
 	chomp;
-	my( $chr, $p0, $p1, $id ) = split /\t/;
-	$var{$chr.":".$p1} = $id;
+	my @a = split /\t/;
+	if ($a[3]) {
+	    $var{$a[0].":".$a[2]} = $a[3];
+	}
+	else {
+	    $var{$a[0].":".$a[2]} = $a[0].":".$a[2];
+	}
     }
     return %var;
 }
 
 sub print_genotype_table{
-    my( $data, $out ) = @_;
+    my( $snp_data, $sample_data, $out ) = @_;
 
     open (GT, ">".$out.".genotypes");
 
     if( ! $opt{'long'} ) {
 	print GT "loc";
-	print GT "\t$_" foreach sort keys %{ ((values %data)[0])->{samples} };
+	print GT "\t$_" foreach sort keys %{ ((values %$snp_data)[0])->{samples} };
 	print GT "\n";
     }
   
     my ($tot_callable, $tot_sites, $HW_pass, $tot_loc);
-    foreach my $loc ( sort keys %$data ) {
+    foreach my $loc ( sort keys %$snp_data ) {
 	my $snp_id = $opt{position} ? $loc : $variant_data{$loc};
 
 	print GT $snp_id if ! $opt{long};
 
-	foreach my $sid ( sort keys %{ $data->{$loc}->{samples} } ) {
-	    my $genotype = $data{$loc}->{samples}->{$sid}->{gt};
+	foreach my $sid ( sort keys %{ $snp_data->{$loc}->{samples} } ) {
+	    my $genotype = $snp_data->{$loc}->{samples}->{$sid}->{gt};
 
 	    if( $opt{long} ) {
 		print GT "$sid\t$sid\t".$snp_id."\t". 
-		         plink_gt( $data{$loc}->{samples}->{$sid}->{basecall} ) ."\n";
+		         plink_gt( $snp_data->{$loc}->{samples}->{$sid}->{basecall} ) ."\n";
 	    }
 	    else {
 		print GT "\t". ( defined( $genotype ) ? $genotype : "NA" ) if ! $opt{long};
@@ -100,9 +109,9 @@ sub print_genotype_table{
 	}
 
 	print GT "\n" if ! $opt{long};
-	$tot_callable += $data->{$loc}->{Ncallable};
-	$tot_sites    += $data->{$loc}->{Ntotal};
-	$HW_pass      += $data->{$loc}->{HW};
+	$tot_callable += $snp_data->{$loc}->{Ncallable};
+	$tot_sites    += $snp_data->{$loc}->{Ntotal};
+	$HW_pass      += $snp_data->{$loc}->{HW};
 	$tot_loc      ++;
     }   
     close GT;
@@ -111,6 +120,20 @@ sub print_genotype_table{
     printf STATS "Average callability: %.2f%%\nSites in H-W equilibrium: %d / %d\n", 100*($tot_callable/$tot_sites),
                                                                                      $HW_pass, $tot_loc;
     close STATS;
+
+
+    open (SAMPLES, ">".$out.".sex");
+    print SAMPLES "locus";
+    print SAMPLES "\t".$_ foreach sort keys %$sample_data;
+    print SAMPLES "\n";
+    foreach my $loc ( sort keys %xy_data ) {
+	my $loc_id = $opt{position} ? $loc : $xy_data{$loc};
+	print SAMPLES $loc_id;
+	foreach my $sid ( sort keys %$sample_data ) {
+	    print SAMPLES "\t". $sample_data->{$sid}->{sex}->{$loc};
+	}
+    }
+    close SAMPLES;
 }
 
 
@@ -123,13 +146,28 @@ sub plink_gt{
 }
  
 
-sub do_genotyping{
-    my $data = shift;
+sub determine_sex{
+    my( $data, $loci ) = @_;
 
-    foreach my $loc ( keys %$data ) {
+    my %sample;
+    foreach my $loc ( keys %$loci ) {
+	foreach my $sid (sort keys %{ $data->{$loc}->{samples} }) {
+	    my $depth = $data->{$loc}->{samples}->{$sid}->{depth};
+	    $sample{$sid}->{sex}->{$loc} = $depth;
+	}
+	delete( $data->{$loc} );
+    }
+    return %sample;
+}
+
+
+sub do_genotyping{
+    my( $data, $loci ) = @_;
+
+    foreach my $loc ( keys %$loci ) {
 	my $num_samples;
 
-	# Do base calling
+	# SNP loci: Do base calling
 	my %gt_cnt;
 	foreach my $sid (sort keys %{ $data->{$loc}->{samples} }) {
     
@@ -194,18 +232,20 @@ sub do_genotyping{
 	my ($AA, $AB, $BB) = ( ($gt_cnt{0} or 0), ($gt_cnt{1} or 0), ($gt_cnt{2} or 0) );
 	$data{$loc}->{HW}        = HW_chi2test( $AA, $AB, $BB );
 	$data{$loc}->{Ncallable} = $AA + $AB + $BB;
-	$data{$loc}->{MAF}       = $AB + 2 * $BB;
+	$data{$loc}->{MAF}       = ( $AB + 2 * $BB ) / 2 * ($AA+$AB+$BB);
     }   
 }
 
 sub get_base_freqs_from_bams{
-    my( $file_data, $snp_fn ) = @_;
+    my( $file_data, $snp_fn, $xy_fn ) = @_;
 
     my $pile_out = $opt{out}.".pile.tmp";
 
+    merge_files( $snp_fn, $xy_fn, $opt{out}.".tmp.bed" );
+
     if( $opt{overwrite} or !-s $pile_out ) {
 	print STDERR "Piling up...";
-	system( $SAMTOOLS_PATH." mpileup -l ". $snp_fn." ". join( " ", sort keys %$file_data ).
+	system( $SAMTOOLS_PATH." mpileup -l ". $opt{out}.".tmp.bed ". join( " ", sort keys %$file_data ).
 		" > $pile_out 2> $opt{out}.mpileup.log" );
 	print STDERR " Done\n";
     }
@@ -234,6 +274,27 @@ sub get_base_freqs_from_bams{
 }
 
 
+sub merge_files{
+    my( $a, $b, $out ) = @_;
+
+    my( @a, @b );
+    open( OUT, ">$out" );
+
+    open( A, $a );
+    @a = <A>;
+    close A;
+
+    if ($b) {
+	open( B, $b );
+	@b = <B>;
+	close B;
+    }
+
+    print OUT join("", @a);
+    print OUT join("", @b) if $b;
+}
+
+
 # FIXME: Use qual string and parse base string properly...
 sub count_bases{
     my ($b, $q) = @_;
@@ -252,11 +313,19 @@ sub count_bases{
 
 # Parse and check command line options
 sub get_options{
-    my %opt = ( 'bed' => $DEFAULT_SNPBED );
-    GetOptions( \%opt, 'bam=s', 'bed=s', 'nocheck', 'overwrite', 'out=s', 
+    my %opt = ( 'bed' => $DEFAULT_SNPBED, 'bedxy' => $DEFAULT_XYBED );
+    GetOptions( \%opt, 'bam=s', 'bed=s', 'bedxy=s', 'nocheck', 'overwrite', 'out=s', 
 		'threads=i', 'long', 'position' );
     error( "Parameter --bam required", 1, 1 ) unless $opt{bam};
     error( "Bed file $opt{bed} does not exist.", 1 ) if $opt{bed} and !-s $opt{bed};
+
+    unless ($opt{bedxy} eq "none") {
+	error( "Sex determination bed file $opt{bedxy} does not exist.", 1 ) if $opt{bedxy} and  !-s $opt{bedxy};
+    }
+    else {
+	$opt{bedxy} = "";
+    }
+
     error( "Parameter --out required.", 1, 1 ) unless $opt{out};
 
     if (!$opt{overwrite} and ( -s $opt{out}.".genotypes" or -s $opt{out}.".stats" ) ) {
@@ -271,8 +340,8 @@ sub display_usage{
     print "provider.pl --bam [METADATA FILE|'FILEMASK'] --out OUT_FILE_PREFIX\n";
 
     print " REQUIRED\n".
-	  "   --bam        Either the path to a metadata file listing bam files\n".
-	  "                or a filemask for bam files\n".
+	  "   --bam        Either the path to a metadata file listing bam files or a\n".
+	  "                filemask for bam files\n".
 	  "   --out        Prefix of output files\n".
 	  " OPTIONAL:\n".
 	  "   --bed        Path to BED file of SNPs to use for finger printing\n".
@@ -283,8 +352,10 @@ sub display_usage{
 	  "                Default: OFF\n".
 	  "   --long       Output genotypes in long format: sampleID[TAB]snpID[TAB]genotype\n".
 	  "                Default: OFF\n".
-	  "   --position   Output genomic position as identifier instead of rsID\n".
-	  "                Default: OFF\n\n";
+	  "   --position   Output genomic position as output SNP ID instead of BED-defined\n".
+	  "                Default: OFF\n".
+	  "   --bedxy      Extra bed file for sex determination. Set to 'none' if not desired.\n".
+	  "                Default: $DEFAULT_XYBED\n\n";
 }
 
 # Get BAM file names from file mask or metadata file.
