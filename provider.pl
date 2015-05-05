@@ -132,7 +132,7 @@ sub print_genotype_table{
 	my $sid = $annotation->{$bam}->{name};
 	print SAMPLES $sid;
 	foreach my $loc ( sort keys %xy_data ) {
-	    print SAMPLES "\t". $sample_data->{$sid}->{sex}->{$loc}."\t".$annotation->{$bam}->{sex};
+	    print SAMPLES "\t". $sample_data->{$sid}->{sex}->{$loc}."\t".($annotation->{$bam}->{sex} or "-");
 	}
 	print SAMPLES "\n";
     }
