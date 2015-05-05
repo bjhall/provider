@@ -10,6 +10,7 @@ my $DEFAULT_XYBED  = "xy_38.bed";
 my %opt = &get_options;
 my %file_data = &get_bampaths( $opt{bam}, $opt{nocheck} );
 my %variant_data = &read_bed( $opt{bed} );
+
 my %xy_data;
 if ( $opt{ bedxy } ) {
     %xy_data = &read_bed( $opt{bedxy} );
@@ -24,9 +25,12 @@ my %data = &get_base_freqs_from_bams( \%file_data, $opt{bed}, $opt{bedxy} );
 my %samples = &determine_sex( \%data, \%xy_data );
 &do_genotyping( \%data, \%variant_data );
 
-&print_genotype_table( \%data, \%samples, $opt{out} );
+&print_genotype_table( \%data, \%samples, $opt{out}, \%file_data );
 
 #&find_matching_samples( \%data, \%file_data );
+
+
+
 
 
 ########################
@@ -80,9 +84,9 @@ sub read_bed{
 }
 
 sub print_genotype_table{
-    my( $snp_data, $sample_data, $out ) = @_;
+    my( $snp_data, $sample_data, $out, $annotation ) = @_;
 
-    open (GT, ">".$out.".genotypes");
+    open( GT, ">".$out.".genotypes" );
 
     if( ! $opt{'long'} ) {
 	print GT "loc";
@@ -121,17 +125,16 @@ sub print_genotype_table{
                                                                                      $HW_pass, $tot_loc;
     close STATS;
 
-
+    # Output file with sex prediction
     open (SAMPLES, ">".$out.".sex");
-    print SAMPLES "locus";
-    print SAMPLES "\t".$_ foreach sort keys %$sample_data;
-    print SAMPLES "\n";
-    foreach my $loc ( sort keys %xy_data ) {
-	my $loc_id = $opt{position} ? $loc : $xy_data{$loc};
-	print SAMPLES $loc_id;
-	foreach my $sid ( sort keys %$sample_data ) {
-	    print SAMPLES "\t". $sample_data->{$sid}->{sex}->{$loc};
+    print SAMPLES "sample\tsex\n";
+    foreach my $bam ( sort keys %$annotation ) {
+	my $sid = $annotation->{$bam}->{name};
+	print SAMPLES $sid;
+	foreach my $loc ( sort keys %xy_data ) {
+	    print SAMPLES "\t". $sample_data->{$sid}->{sex}->{$loc}."\t".$annotation->{$bam}->{sex};
 	}
+	print SAMPLES "\n";
     }
     close SAMPLES;
 }
@@ -153,7 +156,18 @@ sub determine_sex{
     foreach my $loc ( keys %$loci ) {
 	foreach my $sid (sort keys %{ $data->{$loc}->{samples} }) {
 	    my $depth = $data->{$loc}->{samples}->{$sid}->{depth};
-	    $sample{$sid}->{sex}->{$loc} = $depth;
+	    
+	    # FIXME: Arbitrary numbers...
+	    if ($depth >= 50) {
+		$sample{$sid}->{sex}->{$loc} = "M";
+	    }
+	    elsif ($depth <= 5) {
+		$sample{$sid}->{sex}->{$loc} = "F";
+	    }
+	    else {
+		$sample{$sid}->{sex}->{$loc} = "unclear";
+	    }
+
 	}
 	delete( $data->{$loc} );
     }
@@ -236,6 +250,8 @@ sub do_genotyping{
     }   
 }
 
+
+# Run mpilup on bams and count number of A, C, G and Ts in each position.
 sub get_base_freqs_from_bams{
     my( $file_data, $snp_fn, $xy_fn ) = @_;
 
@@ -278,7 +294,6 @@ sub merge_files{
     my( $a, $b, $out ) = @_;
 
     my( @a, @b );
-    open( OUT, ">$out" );
 
     open( A, $a );
     @a = <A>;
@@ -290,8 +305,10 @@ sub merge_files{
 	close B;
     }
 
-    print OUT join("", @a);
-    print OUT join("", @b) if $b;
+    open( OUT, ">$out" );
+    print OUT join( "", @a );
+    print OUT join( "", @b ) if $b;
+    close OUT;
 }
 
 
@@ -415,8 +432,9 @@ sub read_sample_metadata{
 	if (-s $dat[0] or $nocheck) {
 	    my $name = ($dat[1] or "unknown".++$cnt);
 	    $files{ $dat[0] }->{ name } = $name;
-	    $files{ $dat[0] }->{ individual } = $name if $dat[2];
-	    $files{ $dat[0] }->{ sex } = $name if $dat[3];
+	    $files{ $dat[0] }->{ individual } = $name if !$dat[2];
+	    $files{ $dat[0] }->{ individual } = $dat[2] if $dat[2];
+	    $files{ $dat[0] }->{ sex } = $dat[3] if $dat[3];
 	}
 	else {
 	    error( "ERROR: File not found '$dat[0]'", 1 );
