@@ -145,7 +145,7 @@ sub plink_gt{
     return "0\t0" if !defined($bc) or $bc eq "unclear" or $bc eq "lowdata" ;
     return "$bc\t$bc" if length($bc) == 1;
     my ($a1, $a2) = split /\//, $bc;
-    return "$a1\t$a1";
+    return "$a1\t$a2";
 }
  
 
