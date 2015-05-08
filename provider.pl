@@ -1,33 +1,38 @@
 #!/usr/bin/perl -w
 use strict;
+use threads;
 use Getopt::Long;
 use Data::Dumper;
+
 
 my $SAMTOOLS_PATH = "samtools";
 my $DEFAULT_SNPBED = "HPA_1000G_final_38.bed";
 my $DEFAULT_XYBED  = "xy_38.bed";
 
 my %opt = &get_options;
-my %file_data = &get_bampaths( $opt{bam}, $opt{nocheck} );
-my %variant_data = &read_bed( $opt{bed} );
+my %meta_data = &get_bampaths( $opt{bam}, $opt{nocheck} );
+my ($variant_data, $chromosomes)  = &read_bed( $opt{bed} );
 
-my %xy_data;
+my ($xy_data, $xy_chromosomes);
 if ( $opt{ bedxy } ) {
-    %xy_data = &read_bed( $opt{bedxy} );
+    ($xy_data, $xy_chromosomes) = &read_bed( $opt{bedxy} );
+    foreach my $chr (keys %{$xy_chromosomes}) {
+	$chromosomes->{$chr}++;
+    }
 }
 
-unless ( $opt{ nocheck } or &matching_chr_names( (keys %file_data)[0], $opt{bed} ) ) {
+unless ( $opt{ nocheck } or &matching_chr_names( (keys %meta_data)[0], $opt{bed} ) ) {
     error( "Chromosome names do not match between BED and BAMs", 1 );
 }
 
-my %data = &get_base_freqs_from_bams( \%file_data, $opt{bed}, $opt{bedxy} );
+my %data = &get_base_freqs_from_bams( \%meta_data, $opt{bed}, $opt{bedxy}, $chromosomes );
 
-my %samples = &determine_sex( \%data, \%xy_data );
-&do_genotyping( \%data, \%variant_data );
+my %sample = &determine_sex( \%data, $xy_data );
+&do_genotyping( \%data, $variant_data );
 
-&print_genotype_table( \%data, \%samples, $opt{out}, \%file_data );
+&print_genotype_table( \%data, \%sample, $opt{out}, \%meta_data, $variant_data );
 
-#&find_matching_samples( \%data, \%file_data );
+&detect_unexpected( \%data, \%meta_data, \%sample );
 
 
 
@@ -35,18 +40,35 @@ my %samples = &determine_sex( \%data, \%xy_data );
 
 ########################
 
-sub find_matching_samples{
-    my( $data, $file_data ) = @_;
+sub detect_unexpected{
+    my( $data, $meta_data, $sample_data ) = @_;
 
-    my %dist;
-    foreach my $samp1 ( keys %$file_data ) {
-	my $name1 = $file_data{$samp1}->{name};
-	foreach my $samp2 (keys %$file_data) {
-	    next if $samp1 eq $samp2;
-	    my $name2 = $file_data{$samp2}->{name};
+    my (%dist, %seen);
+    foreach my $samp1 ( keys %$meta_data ) {
+	my $name1 = $meta_data->{$samp1}->{name};
+	$seen{$samp1} = 1;
+
+	my $anno_sex = $meta_data->{$samp1}->{sex};
+	my $pred_sex = $sample_data->{$name1}->{sex}->{'Y:2844149'};
+	print "UNEXPECTED SEX: $name1 (Predicted:$pred_sex, Annotated:$anno_sex)\n" if ($anno_sex ne "-" and $anno_sex ne $pred_sex);
+	
+
+	foreach my $samp2 (keys %$meta_data) {
+	    next if $seen{$samp2};
+
+	    my $name2 = $meta_data->{$samp2}->{name};
 	    unless (defined( $dist{$name2}->{$name1} )) {
-		$dist{$name1}->{$name2} = distance( $data, $name1, $name2 );
-		print "$name1\t$name2\t".$dist{$name1}->{$name2}."\n";
+		my $dist = distance( $data, $name1, $name2 );
+		$dist{$name1}->{$name2} = $dist;
+		my ($ind1, $ind2) = ( $meta_data->{$samp1}->{individual}, $meta_data->{$samp2}->{individual} );
+
+		if ($ind1 eq $ind2 and $dist > 0.05) {
+		    printf "UNEXPECTED DIFFERENT: %s - %s (%.2f%%)\n", $name1, $name2, 100*(1-$dist{$name1}->{$name2});
+		}
+		elsif ($ind1 ne $ind2 and $dist < 0.05) {
+		    printf "UNEXPECTED IDENTICAL: %s - %s (%.2f%%)\n", $name1, $name2, 100*(1-$dist{$name1}->{$name2});
+		}
+		
 	    }
 	}
     }
@@ -57,8 +79,8 @@ sub distance{
 
     my ( $identical, $tot ) = ( 0, 0 );
     foreach my $loc (keys %$data) {
-	if( defined($data{$loc}->{samples}->{$id1}->{gt}) and defined($data{$loc}->{samples}->{$id2}->{gt}) ) {
-	    $identical++ if $data{$loc}->{samples}->{$id1}->{gt} eq $data{$loc}->{samples}->{$id2}->{gt};
+	if( defined($data->{$loc}->{samples}->{$id1}->{gt}) and defined($data->{$loc}->{samples}->{$id2}->{gt}) ) {
+	    $identical++ if $data->{$loc}->{samples}->{$id1}->{gt} eq $data->{$loc}->{samples}->{$id2}->{gt};
 	    $tot++;
 	}
     }
@@ -69,10 +91,11 @@ sub distance{
 sub read_bed{
     my $bed = shift;
     open( BED, $bed );
-    my %var;
+    my (%var, %chr);
     while( <BED> ) {
 	chomp;
 	my @a = split /\t/;
+	$chr{$a[0]} ++;
 	if ($a[3]) {
 	    $var{$a[0].":".$a[2]} = $a[3];
 	}
@@ -80,11 +103,11 @@ sub read_bed{
 	    $var{$a[0].":".$a[2]} = $a[0].":".$a[2];
 	}
     }
-    return %var;
+    return( \%var, \%chr );
 }
 
 sub print_genotype_table{
-    my( $snp_data, $sample_data, $out, $annotation ) = @_;
+    my( $snp_data, $sample_data, $out, $annotation, $variants ) = @_;
 
     open( GT, ">".$out.".genotypes" );
 
@@ -96,7 +119,7 @@ sub print_genotype_table{
   
     my ($tot_callable, $tot_sites, $HW_pass, $tot_loc);
     foreach my $loc ( sort keys %$snp_data ) {
-	my $snp_id = $opt{position} ? $loc : $variant_data{$loc};
+	my $snp_id = $opt{position} ? $loc : $variants->{$loc};
 
 	print GT $snp_id if ! $opt{long};
 
@@ -131,7 +154,7 @@ sub print_genotype_table{
     foreach my $bam ( sort keys %$annotation ) {
 	my $sid = $annotation->{$bam}->{name};
 	print SAMPLES $sid;
-	foreach my $loc ( sort keys %xy_data ) {
+	foreach my $loc ( sort keys %$xy_data ) {
 	    print SAMPLES "\t". $sample_data->{$sid}->{sex}->{$loc}."\t".($annotation->{$bam}->{sex} or "-");
 	}
 	print SAMPLES "\n";
@@ -251,18 +274,48 @@ sub do_genotyping{
 }
 
 
+# Run mpileup for a single chromosome in a thread.
+sub mpileup_in_thread {
+    my ($chr, $out, $bams) = @_;
+    my $id = threads->tid();
+    system( $SAMTOOLS_PATH." mpileup -l ". $opt{out}.".tmp.bed -r $chr $bams".
+	    " > $out.$chr 2> $opt{out}.mpileup.$chr.log" );
+    threads->exit();
+}
+
+
 # Run mpilup on bams and count number of A, C, G and Ts in each position.
 sub get_base_freqs_from_bams{
-    my( $file_data, $snp_fn, $xy_fn ) = @_;
+    my( $file_data, $snp_fn, $xy_fn, $chromosomes ) = @_;
 
     my $pile_out = $opt{out}.".pile.tmp";
 
-    merge_files( $snp_fn, $xy_fn, $opt{out}.".tmp.bed" );
+    merge_files( [$snp_fn, $xy_fn], $opt{out}.".tmp.bed" );
 
+    my @threads;
     if( $opt{overwrite} or !-s $pile_out ) {
-	print STDERR "Piling up...";
-	system( $SAMTOOLS_PATH." mpileup -l ". $opt{out}.".tmp.bed ". join( " ", sort keys %$file_data ).
-		" > $pile_out 2> $opt{out}.mpileup.log" );
+
+	# Run mpileup in threads, split by chromosomes
+	if( $opt{thread} ) {
+	    my $i = 0;
+	    my @pileup_files;
+	    foreach my $chr ( sort { $chromosomes->{$b} <=> $chromosomes->{$a} } keys %{$chromosomes} ) {
+		$threads[$i] = threads->create( \&mpileup_in_thread, ( $chr, $pile_out, join( " ", sort keys %$file_data) ) );
+		push (@pileup_files, "$pile_out.$chr");
+		$i++;
+	    }
+	    $_->join() for @threads;
+
+	    merge_files( \@pileup_files, $pile_out );
+	    unlink $_ foreach @pileup_files;
+	}
+
+	# Run mpileup unthreaded
+	else {
+	    system( $SAMTOOLS_PATH." mpileup -l ". $opt{out}.".tmp.bed ". join( " ", sort keys %$file_data ).
+		    " > $pile_out 2> $opt{out}.mpileup.log" );
+	}
+
 	print STDERR " Done\n";
     }
     else {
@@ -281,8 +334,8 @@ sub get_base_freqs_from_bams{
 	    $i += 3;
 	    my ($depth, $base, $qual) = ( $p[$i], $p[$i+1], $p[$i+2] );
 	    my $bases = count_bases( $base, $qual );
-	    $frq{$loc}->{samples}->{ $file_data{$id}->{name} }->{bases} = $bases;
-	    $frq{$loc}->{samples}->{ $file_data{$id}->{name} }->{depth} = sum( values %{ $bases } );
+	    $frq{$loc}->{samples}->{ $file_data->{$id}->{name} }->{bases} = $bases;
+	    $frq{$loc}->{samples}->{ $file_data->{$id}->{name} }->{depth} = sum( values %{ $bases } );
 	}
     }
 
@@ -290,7 +343,7 @@ sub get_base_freqs_from_bams{
 }
 
 
-sub merge_files{
+sub merge_files1{ # FIXME: REMOVE
     my( $a, $b, $out ) = @_;
 
     my( @a, @b );
@@ -308,6 +361,20 @@ sub merge_files{
     open( OUT, ">$out" );
     print OUT join( "", @a );
     print OUT join( "", @b ) if $b;
+    close OUT;
+}
+
+sub merge_files{
+    my ($files, $out) = @_;
+    
+    open( OUT, ">$out" );
+    foreach (@$files) {
+	open (F, $_);
+	my @a = <F>;
+	close F;
+
+	print OUT join( "", @a );
+    }
     close OUT;
 }
 
@@ -332,7 +399,7 @@ sub count_bases{
 sub get_options{
     my %opt = ( 'bed' => $DEFAULT_SNPBED, 'bedxy' => $DEFAULT_XYBED );
     GetOptions( \%opt, 'bam=s', 'bed=s', 'bedxy=s', 'nocheck', 'overwrite', 'out=s', 
-		'threads=i', 'long', 'position' );
+		'thread', 'long', 'position' );
     error( "Parameter --bam required", 1, 1 ) unless $opt{bam};
     error( "Bed file $opt{bed} does not exist.", 1 ) if $opt{bed} and !-s $opt{bed};
 
@@ -372,7 +439,10 @@ sub display_usage{
 	  "   --position   Output genomic position as output SNP ID instead of BED-defined\n".
 	  "                Default: OFF\n".
 	  "   --bedxy      Extra bed file for sex determination. Set to 'none' if not desired.\n".
-	  "                Default: $DEFAULT_XYBED\n\n";
+	  "                Default: $DEFAULT_XYBED\n".
+	  "   --thread     Run in threaded mode.\n\n";
+
+
 }
 
 # Get BAM file names from file mask or metadata file.
