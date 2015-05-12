@@ -49,7 +49,7 @@ sub detect_unexpected{
 	$seen{$samp1} = 1;
 
 	my $anno_sex = $meta_data->{$samp1}->{sex};
-	my $pred_sex = $sample_data->{$name1}->{sex}->{'Y:2844149'};
+	my $pred_sex = ( $sample_data->{$name1}->{sex}->{'Y:2844149'} or $sample_data->{$name1}->{sex}->{'chrY:2844149'}); # FIXME!
 	print "UNEXPECTED SEX: $name1 (Predicted:$pred_sex, Annotated:$anno_sex)\n" if ($anno_sex ne "-" and $anno_sex ne $pred_sex);
 	
 
@@ -150,12 +150,12 @@ sub print_genotype_table{
 
     # Output file with sex prediction
     open (SAMPLES, ">".$out.".sex");
-    print SAMPLES "sample\tsex\n";
+    print SAMPLES "sample\tpredicted_sex\tannotated_sex\n";
     foreach my $bam ( sort keys %$annotation ) {
 	my $sid = $annotation->{$bam}->{name};
 	print SAMPLES $sid;
 	foreach my $loc ( sort keys %$xy_data ) {
-	    print SAMPLES "\t". $sample_data->{$sid}->{sex}->{$loc}."\t".($annotation->{$bam}->{sex} or "-");
+	    print SAMPLES "\t". ($sample_data->{$sid}->{sex}->{$loc} or "-")."\t".($annotation->{$bam}->{sex} or "-");
 	}
 	print SAMPLES "\n";
     }
@@ -342,27 +342,6 @@ sub get_base_freqs_from_bams{
     return %frq
 }
 
-
-sub merge_files1{ # FIXME: REMOVE
-    my( $a, $b, $out ) = @_;
-
-    my( @a, @b );
-
-    open( A, $a );
-    @a = <A>;
-    close A;
-
-    if ($b) {
-	open( B, $b );
-	@b = <B>;
-	close B;
-    }
-
-    open( OUT, ">$out" );
-    print OUT join( "", @a );
-    print OUT join( "", @b ) if $b;
-    close OUT;
-}
 
 sub merge_files{
     my ($files, $out) = @_;
