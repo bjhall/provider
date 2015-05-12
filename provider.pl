@@ -60,7 +60,7 @@ sub detect_unexpected{
 	}
 	
 
-	# Check sample simlariry based on genotypes.
+	# Check sample simlarity based on genotypes.
 	foreach my $samp2 (keys %$meta_data) {
 	    next if $seen{$samp2};
 
@@ -500,7 +500,7 @@ sub read_sample_metadata{
     
     my %files;
     my $cnt;
-
+    my %used_names;
     open( TABLE, $fn );
     while (<TABLE>) {
 	chomp;
@@ -510,6 +510,10 @@ sub read_sample_metadata{
 	my @dat = split /\t/;
 	if (-s $dat[0] or $nocheck) {
 	    my $name = ($dat[1] or "unknown".++$cnt);
+	    if ($used_names{$name}) {
+		error( "ERROR: Sample IDs must be unique ($name found multple times)", 1 );
+	    }
+	    $used_names{$name} = 1;
 	    $files{ $dat[0] }->{ name } = $name;
 	    $files{ $dat[0] }->{ individual } = $name if !$dat[2];
 	    $files{ $dat[0] }->{ individual } = $dat[2] if $dat[2];
@@ -579,7 +583,7 @@ sub error{
     my ($msg, $error_code, $print_usage) = @_;
     print STDERR "*** ERROR: $_[0] ***\n\n";
     &display_usage if $print_usage;
-    exit $_[1];
+    exit $error_code;
 }
 
 
