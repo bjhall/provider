@@ -22,7 +22,11 @@ if ( $opt{ bedxy } ) {
 }
 
 unless ( $opt{ nocheck } or &matching_chr_names( (keys %meta_data)[0], $opt{bed} ) ) {
-    error( "Chromosome names do not match between BED and BAMs", 1 );
+    error( "Chromosome names do not match between main BED and BAMs", 1 );
+}
+
+unless ( $opt{ nocheck } or &matching_chr_names( (keys %meta_data)[0], $opt{bedxy} ) ) {
+    error( "Chromosome names do not match between xy BED and BAMs", 1 );
 }
 
 my %data = &get_base_freqs_from_bams( \%meta_data, $opt{bed}, $opt{bedxy}, $chromosomes );
@@ -48,31 +52,51 @@ sub detect_unexpected{
 	my $name1 = $meta_data->{$samp1}->{name};
 	$seen{$samp1} = 1;
 
-	my $anno_sex = $meta_data->{$samp1}->{sex};
-	my $pred_sex = ( $sample_data->{$name1}->{sex}->{'Y:2844149'} or $sample_data->{$name1}->{sex}->{'chrY:2844149'}); # FIXME!
-	print "UNEXPECTED SEX: $name1 (Predicted:$pred_sex, Annotated:$anno_sex)\n" if ($anno_sex ne "-" and $anno_sex ne $pred_sex);
+	# If sex was annotated, check if predicted sex agrees.
+	if ($meta_data->{$samp1}->{sex}) {
+	    my $anno_sex = $meta_data->{$samp1}->{sex};
+	    my $pred_sex = ( $sample_data->{$name1}->{sex}->{'Y:2844149'} or $sample_data->{$name1}->{sex}->{'chrY:2844149'}); # FIXME!
+	    print "UNEXPECTED SEX: $name1 (Predicted:$pred_sex, Annotated:$anno_sex)\n" if ($anno_sex ne "-" and $anno_sex ne $pred_sex);
+	}
 	
 
+	# Check sample simlariry based on genotypes.
 	foreach my $samp2 (keys %$meta_data) {
 	    next if $seen{$samp2};
 
 	    my $name2 = $meta_data->{$samp2}->{name};
 	    unless (defined( $dist{$name2}->{$name1} )) {
 		my $dist = distance( $data, $name1, $name2 );
-		$dist{$name1}->{$name2} = $dist;
-		my ($ind1, $ind2) = ( $meta_data->{$samp1}->{individual}, $meta_data->{$samp2}->{individual} );
 
-		if ($ind1 eq $ind2 and $dist > 0.05) {
-		    printf "UNEXPECTED DIFFERENT: %s - %s (%.2f%%)\n", $name1, $name2, 100*(1-$dist{$name1}->{$name2});
+		next if $dist == -1; # Skip samples were distance could not be calculated (all NAs)
+
+		$dist{$name1}->{$name2} = $dist;
+		
+		# If individual ID exists for both samples, check if annotation & prediction agrees.
+		if ( $meta_data->{$samp1}->{individual} and $meta_data->{$samp2}->{individual} ) {
+		    my ($ind1, $ind2) = ( $meta_data->{$samp1}->{individual}, $meta_data->{$samp2}->{individual} );
+
+		    if ($ind1 eq $ind2 and $dist > 0.05) {
+			printf "UNEXPECTED DIFFERENT: %s - %s (%.2f%%)\n", $name1, $name2, 100*(1-$dist{$name1}->{$name2});
+		    }
+		    elsif ($ind1 ne $ind2 and $dist < 0.05) {
+			printf "UNEXPECTED IDENTICAL: %s - %s (%.2f%%)\n", $name1, $name2, 100*(1-$dist{$name1}->{$name2});
+		    }
 		}
-		elsif ($ind1 ne $ind2 and $dist < 0.05) {
-		    printf "UNEXPECTED IDENTICAL: %s - %s (%.2f%%)\n", $name1, $name2, 100*(1-$dist{$name1}->{$name2});
+
+		# If individual ID is missing for either sample, check if samples appaer to be from same individual
+		else {
+		    if ($dist < 0.05) {
+			printf "Samples %s and %s appear to be same individual/twins (%.2f%%)\n", 
+			       $name1, $name2,100*(1-$dist{$name1}->{$name2});
+		    }
 		}
 		
 	    }
 	}
     }
 }
+
 
 sub distance{
     my( $data, $id1, $id2 ) = @_;
@@ -85,8 +109,12 @@ sub distance{
 	}
     }
 
-    return ($tot-$identical) / $tot;
+    if ($tot > 0) {
+	return ($tot-$identical) / $tot;
+    }
+    return -1;
 }
+
 
 sub read_bed{
     my $bed = shift;
@@ -105,6 +133,7 @@ sub read_bed{
     }
     return( \%var, \%chr );
 }
+
 
 sub print_genotype_table{
     my( $snp_data, $sample_data, $out, $annotation, $variants ) = @_;
@@ -338,6 +367,7 @@ sub get_base_freqs_from_bams{
 	    $frq{$loc}->{samples}->{ $file_data->{$id}->{name} }->{depth} = sum( values %{ $bases } );
 	}
     }
+    close PILE;
 
     return %frq
 }
