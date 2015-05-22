@@ -4,7 +4,6 @@ use threads;
 use Getopt::Long;
 use Data::Dumper;
 
-
 my $SAMTOOLS_PATH = "samtools";
 my $DEFAULT_SNPBED = "HPA_1000G_final_38.bed";
 my $DEFAULT_XYBED  = "xy_38.bed";
@@ -55,7 +54,7 @@ sub detect_unexpected{
 	# If sex was annotated, check if predicted sex agrees.
 	if ($meta_data->{$samp1}->{sex}) {
 	    my $anno_sex = $meta_data->{$samp1}->{sex};
-	    my $pred_sex = ( $sample_data->{$name1}->{sex}->{'Y:2844149'} or $sample_data->{$name1}->{sex}->{'chrY:2844149'}); # FIXME!
+	    my $pred_sex = $sample_data->{$name1}->{sex}->{pred};
 	    print "UNEXPECTED SEX: $name1 (Predicted:$pred_sex, Annotated:$anno_sex)\n" if ($anno_sex ne "-" and $anno_sex ne $pred_sex);
 	}
 	
@@ -68,11 +67,11 @@ sub detect_unexpected{
 	    unless (defined( $dist{$name2}->{$name1} )) {
 		my $dist = distance( $data, $name1, $name2 );
 
-		next if $dist == -1; # Skip samples were distance could not be calculated (all NAs)
+		next if $dist == -1; # Skip samples where distance could not be calculated (all NAs)
 
 		$dist{$name1}->{$name2} = $dist;
 		
-		# If individual ID exists for both samples, check if annotation & prediction agrees.
+		# If individual ID exist for both samples, check if annotation & prediction agrees.
 		if ( $meta_data->{$samp1}->{individual} and $meta_data->{$samp2}->{individual} ) {
 		    my ($ind1, $ind2) = ( $meta_data->{$samp1}->{individual}, $meta_data->{$samp2}->{individual} );
 
@@ -182,11 +181,7 @@ sub print_genotype_table{
     print SAMPLES "sample\tpredicted_sex\tannotated_sex\n";
     foreach my $bam ( sort keys %$annotation ) {
 	my $sid = $annotation->{$bam}->{name};
-	print SAMPLES $sid;
-	foreach my $loc ( sort keys %$xy_data ) {
-	    print SAMPLES "\t". ($sample_data->{$sid}->{sex}->{$loc} or "-")."\t".($annotation->{$bam}->{sex} or "-");
-	}
-	print SAMPLES "\n";
+	print SAMPLES $sid."\t". ($sample_data->{$sid}->{sex}->{pred} or "-")."\t".($annotation->{$bam}->{sex} or "-")."\n";
     }
     close SAMPLES;
 }
@@ -204,23 +199,50 @@ sub plink_gt{
 sub determine_sex{
     my( $data, $loci ) = @_;
 
+    # Determine average coverage of normal loci, for comparison with sex determination loci
+    my %avg_cov;
+    foreach my $loc (keys %$data) {
+ 	next if $loci->{$loc};
+ 	foreach my $sid (keys %{ $data->{$loc}->{samples} }) {
+ 	    push( @{ $avg_cov{$sid} }, $data->{$loc}->{samples}->{$sid}->{depth} );
+ 	}
+    }
+    $avg_cov{$_} = mean( @{$avg_cov{$_}} ) foreach keys %avg_cov;
+
+    # Check whether sex loci show high/low coverage compared to normal loci 
     my %sample;
+    my( %F, %M );
     foreach my $loc ( keys %$loci ) {
 	foreach my $sid (sort keys %{ $data->{$loc}->{samples} }) {
-	    my $depth = $data->{$loc}->{samples}->{$sid}->{depth};
+	    my $sex_depth = $data->{$loc}->{samples}->{$sid}->{depth};
 	    
 	    # FIXME: Arbitrary numbers...
-	    if ($depth >= 50) {
-		$sample{$sid}->{sex}->{$loc} = "M";
+	    if ($sex_depth / $avg_cov{$sid} >= 0.2) { 
+		$M{$sid}++;
+		$sample{$sid}->{sex}->{loc}->{$loc} = "M";
 	    }
-	    elsif ($depth <= 5) {
-		$sample{$sid}->{sex}->{$loc} = "F";
+	    elsif ($sex_depth / $avg_cov{$sid} <= 0.05) {
+		$sample{$sid}->{sex}->{loc}->{$loc} = "F";
+		$F{$sid}++;
 	    }
 	    else {
-		$sample{$sid}->{sex}->{$loc} = "unclear";
+		$sample{$sid}->{sex}->{loc}->{$loc} = "unclear";
 	    }
-
 	}
+
+	# If all loci agree -> predicted sex.
+ 	foreach my $sid (sort keys %{ $data->{$loc}->{samples} }) {
+	    if( $M{$sid} and !$F{$sid} ) {
+		$sample{$sid}->{sex}->{pred} = "M";
+	    }
+	    elsif( $F{$sid} and !$M{$sid} ) {
+		$sample{$sid}->{sex}->{pred} = "F";
+	    }
+	    else {
+		$sample{$sid}->{sex}->{pred} = "unclear";
+	    }
+	}
+
 	delete( $data->{$loc} );
     }
     return %sample;
@@ -345,7 +367,6 @@ sub get_base_freqs_from_bams{
 		    " > $pile_out 2> $opt{out}.mpileup.log" );
 	}
 
-	print STDERR " Done\n";
     }
     else {
 	print STDERR "WARNING: Prior pileup file found, resuming with that file. Use --overwrite to override\n";
@@ -515,7 +536,7 @@ sub read_sample_metadata{
 	    }
 	    $used_names{$name} = 1;
 	    $files{ $dat[0] }->{ name } = $name;
-	    $files{ $dat[0] }->{ individual } = $name if !$dat[2];
+	    $files{ $dat[0] }->{ individual } = "" if !$dat[2];
 	    $files{ $dat[0] }->{ individual } = $dat[2] if $dat[2];
 	    $files{ $dat[0] }->{ sex } = $dat[3] if $dat[3];
 	}
@@ -605,4 +626,15 @@ sub large {
 	return $i if $cnt == $pos;
     }
     die "Large outside of array";
+}
+
+sub mean {
+    my $sum;
+    if (@_) {
+	$sum += $_ foreach @_;
+	return $sum/@_;
+    }
+    else {
+	return 0;
+    }
 }
