@@ -15,9 +15,7 @@ my ($variant_data, $chromosomes)  = &read_bed( $opt{bed} );
 my ($xy_data, $xy_chromosomes);
 if ( $opt{ bedxy } ) {
     ($xy_data, $xy_chromosomes) = &read_bed( $opt{bedxy} );
-    foreach my $chr (keys %{$xy_chromosomes}) {
-	$chromosomes->{$chr}++;
-    }
+    foreach my $chr (keys %{$xy_chromosomes}) {	$chromosomes->{$chr}++; }
 }
 
 unless ( $opt{ nocheck } or &matching_chr_names( (keys %meta_data)[0], $opt{bed} ) ) {
@@ -259,14 +257,19 @@ sub do_genotyping{
 	my %gt_cnt;
 	foreach my $sid (sort keys %{ $data->{$loc}->{samples} }) {
     
+	    # Get base frequencies for the locus into %f 
 	    my %f = %{ $data->{$loc}->{samples}->{$sid}->{bases} };
+
+	    # Get read depth
 	    my $tot = $data->{$loc}->{samples}->{$sid}->{depth};
+
+	    # Fint most common and second most common base
 	    my ($max, $second) = ( large(\%f, 1), large(\%f, 2) );
 
-	    # Require at least 6 reads in the SNP position.
+	    # Require a depth of at least 6 reads in the locus
 	    my $gt;
-	    if ($f{$max} >= 6) {
-		my $ap = ($f{$max} - $f{$second}) / $tot;
+	    if ($tot >= 6) {
+		my $ap = ( $f{$max} - $f{$second} ) / $tot;
 	
 		if ($ap < 0.6) { # Heterozygote
 		    $gt = join "/", sort( $max,$second );
@@ -326,9 +329,8 @@ sub do_genotyping{
 
 
 # Run mpileup for a single chromosome in a thread.
-sub mpileup_in_thread {
+sub mpileup_thread {
     my ($chr, $out, $bams) = @_;
-    my $id = threads->tid();
     system( $SAMTOOLS_PATH." mpileup -l ". $opt{out}.".tmp.bed -r $chr $bams".
 	    " > $out.$chr 2> $opt{out}.mpileup.$chr.log" );
     threads->exit();
@@ -339,20 +341,25 @@ sub mpileup_in_thread {
 sub get_base_freqs_from_bams{
     my( $file_data, $snp_fn, $xy_fn, $chromosomes ) = @_;
 
+    # Define final pileup output file name
     my $pile_out = $opt{out}.".pile.tmp";
 
+    # Get BAM files into an array
+    my @bams = sort keys %$file_data;
+
+    # Merge the two BED files
     merge_files( [$snp_fn, $xy_fn], $opt{out}.".tmp.bed" );
 
-    my @threads;
     if( $opt{overwrite} or !-s $pile_out ) {
 
 	# Run mpileup in threads, split by chromosomes
 	if( $opt{thread} ) {
+	    my @threads;
 	    my $i = 0;
 	    my @pileup_files;
 	    foreach my $chr ( sort { $chromosomes->{$b} <=> $chromosomes->{$a} } keys %{$chromosomes} ) {
-		$threads[$i] = threads->create( \&mpileup_in_thread, ( $chr, $pile_out, join( " ", sort keys %$file_data) ) );
-		push (@pileup_files, "$pile_out.$chr");
+		$threads[$i] = threads->create( \&mpileup_thread, ( $chr, $pile_out, join( " ", @bams ) ) );
+		push( @pileup_files, "$pile_out.$chr" );
 		$i++;
 	    }
 	    $_->join() for @threads;
@@ -363,7 +370,7 @@ sub get_base_freqs_from_bams{
 
 	# Run mpileup unthreaded
 	else {
-	    system( $SAMTOOLS_PATH." mpileup -l ". $opt{out}.".tmp.bed ". join( " ", sort keys %$file_data ).
+	    system( $SAMTOOLS_PATH." mpileup -l ". $opt{out}.".tmp.bed ". join( " ", @bams ).
 		    " > $pile_out 2> $opt{out}.mpileup.log" );
 	}
 
@@ -372,20 +379,21 @@ sub get_base_freqs_from_bams{
 	print STDERR "WARNING: Prior pileup file found, resuming with that file. Use --overwrite to override\n";
     }
 
+    # Collect base frequencies from pileup file
     my %frq;
-
     open( PILE, $pile_out );
     while (<PILE>) {
 	my @p = split /\t/;
 	my $loc = $p[0].":".$p[1];
 	
 	my $i;
-	foreach my $id ( sort keys %$file_data ) {
+	foreach my $fn ( @bams ) {
 	    $i += 3;
+	    my $sample_name = $file_data->{$fn}->{name};
 	    my ($depth, $base, $qual) = ( $p[$i], $p[$i+1], $p[$i+2] );
 	    my $bases = count_bases( $base, $qual );
-	    $frq{$loc}->{samples}->{ $file_data->{$id}->{name} }->{bases} = $bases;
-	    $frq{$loc}->{samples}->{ $file_data->{$id}->{name} }->{depth} = sum( values %{ $bases } );
+	    $frq{$loc}->{samples}->{ $sample_name }->{bases} = $bases;
+	    $frq{$loc}->{samples}->{ $sample_name }->{depth} = sum( values %{ $bases } );
 	}
     }
     close PILE;
@@ -393,7 +401,7 @@ sub get_base_freqs_from_bams{
     return %frq
 }
 
-
+# Merge a number of files, similar to 'cat file1 file2 > merged'
 sub merge_files{
     my ($files, $out) = @_;
     
@@ -402,7 +410,6 @@ sub merge_files{
 	open (F, $_);
 	my @a = <F>;
 	close F;
-
 	print OUT join( "", @a );
     }
     close OUT;
@@ -481,7 +488,7 @@ sub get_bampaths{
 
     my (@files) = sort glob $mask;
     
-    # No file 
+    # No file, print error
     if (@files == 0) {
 	error( "No file(s) found: $mask", 1 );	
     }
@@ -505,9 +512,7 @@ sub get_bampaths{
     # Multiple files
     else {
 	my %files;
-	my $cnt = 0;
 	foreach (@files) {
-	    $cnt ++;
 	    $files{$_}->{ name } = $_;
 	}
 	return %files;
@@ -519,25 +524,23 @@ sub get_bampaths{
 sub read_sample_metadata{
     my($fn, $nocheck ) = @_;
     
-    my %files;
+    my( %files, %used_names );
     my $cnt;
-    my %used_names;
     open( TABLE, $fn );
-    while (<TABLE>) {
+    while( <TABLE> ) {
 	chomp;
 
 	next if /^#/ or /^\s*$/;  # Skip comments and empty lines
 
 	my @dat = split /\t/;
-	if (-s $dat[0] or $nocheck) {
+	if( -s $dat[0] or $nocheck ) {
 	    my $name = ($dat[1] or "unknown".++$cnt);
-	    if ($used_names{$name}) {
+	    if( $used_names{$name} ) {
 		error( "ERROR: Sample IDs must be unique ($name found multple times)", 1 );
 	    }
 	    $used_names{$name} = 1;
 	    $files{ $dat[0] }->{ name } = $name;
-	    $files{ $dat[0] }->{ individual } = "" if !$dat[2];
-	    $files{ $dat[0] }->{ individual } = $dat[2] if $dat[2];
+	    $files{ $dat[0] }->{ individual } = ( $dat[2] or "");
 	    $files{ $dat[0] }->{ sex } = $dat[3] if $dat[3];
 	}
 	else {
@@ -551,21 +554,28 @@ sub read_sample_metadata{
 # Perform chi2test for Hardy-Weinberg equilibrium
 sub HW_chi2test {
     my ($AA, $AB, $BB) = @_;
+    my $CHI2_CUTOFF = 3.84;
 
     return 0 if $AA == 0 or $BB == 0;
 
+    # Number of genotyped individuals
     my $N = $AA + $AB + $BB;
+
+    # Observed allele frequencies (p = A, q = B)
     my $p = ($AA*2 + $AB) / (2*$N);
     my $q = ($BB*2 + $AB) / (2*$N);
+
+    # Expected equilibrium genotype frequencies
     my $eAA = ($p ** 2) * $N;
     my $eBB = ($q ** 2) * $N;
     my $eAB = (2 * $p * $q) * $N;
     
+    # Chi-square
     my $chi2 = ($AA-$eAA)**2 / $eAA +
 	($BB-$eBB)**2 / $eBB +
 	($AB-$eAB)**2 / $eAB;
     
-    if ($chi2 < 3.84) {
+    if( $chi2 < $CHI2_CUTOFF ) {
 	return 1;
     }
     return 0;
@@ -577,6 +587,7 @@ sub matching_chr_names {
     my ($bam, $bed) = @_;
     my (%bam_chr, %bed_chr);
 
+    # Get all chromosome names from BAM the file header
     my @header = `$SAMTOOLS_PATH view -H $bam`;
     foreach (@header) {
 	if( /^\@SQ/ ) {
@@ -585,21 +596,24 @@ sub matching_chr_names {
 	}
     }
 
+    # Get chromosome names from BED file with defined SNPs
     open( BED, $bed );
     while( <BED> ) {
 	my @a = split /\t/;
 	$bed_chr{$a[0]} = 1;
     }
 
+    # Fail if any of the chromosomes defined BED in are missing in BAM.
     foreach my $chr (keys %bed_chr) {
 	return 0 unless $bam_chr{ $chr };
     }
 
+    # All matching
     return 1;
 }
 
 
-# Prints error and quits program
+# Print error message and quit program
 sub error{
     my ($msg, $error_code, $print_usage) = @_;
     print STDERR "*** ERROR: $_[0] ***\n\n";
@@ -608,15 +622,15 @@ sub error{
 }
 
 
+# Sum up values of an array
 sub sum{
     my $sum;
-    foreach (@_) {
-	$sum += $_;
-    }
+    $sum += $_ foreach @_;
     return $sum;
 }
 
 
+# Return the key of the Xth highest value of a hash.
 sub large {
     my ($hash, $pos) = @_;
 
@@ -628,6 +642,8 @@ sub large {
     die "Large outside of array";
 }
 
+
+# Calculate the average of values in an array
 sub mean {
     my $sum;
     if (@_) {

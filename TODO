@@ -1,3 +1,2 @@
-* Enable parallel mpileup for multiple samples
-* Check expression on chrX:73040486-73072588 and chrY: 2841486-2932000 for expression based geneder call
+* Check if BAM files are index, or automatically index them
 * Detect chromosome names automatically
