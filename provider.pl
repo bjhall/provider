@@ -331,6 +331,7 @@ sub do_genotyping{
 # Run mpileup for a single chromosome in a thread.
 sub mpileup_thread {
     my ($chr, $out, $bams) = @_;
+    my $id = threads->tid();
     system( $SAMTOOLS_PATH." mpileup -l ". $opt{out}.".tmp.bed -r $chr $bams".
 	    " > $out.$chr 2> $opt{out}.mpileup.$chr.log" );
     threads->exit();

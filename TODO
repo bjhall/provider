@@ -1,2 +1,3 @@
+* Calc p-value of identical individuals (using both empirical and 1000G MAFs)
 * Check if BAM files are index, or automatically index them
 * Detect chromosome names automatically
