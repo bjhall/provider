@@ -10,7 +10,7 @@ my $DEFAULT_XYBED  = "xy_38.bed";
 
 my %opt = &get_options;
 my %meta_data = &get_bampaths( $opt{bam}, $opt{nocheck} );
-my ($variant_data, $chromosomes)  = &read_bed( $opt{bed} );
+my ($variant_data, $chromosomes, $allele_freq)  = &read_bed( $opt{bed} );
 
 my ($xy_data, $xy_chromosomes);
 if ( $opt{ bedxy } ) {
@@ -29,20 +29,19 @@ unless ( $opt{ nocheck } or &matching_chr_names( (keys %meta_data)[0], $opt{bedx
 my %data = &get_base_freqs_from_bams( \%meta_data, $opt{bed}, $opt{bedxy}, $chromosomes );
 
 my %sample = &determine_sex( \%data, $xy_data );
-&do_genotyping( \%data, $variant_data );
+&do_genotyping( \%data, $variant_data, $allele_freq );
 
 &print_genotype_table( \%data, \%sample, $opt{out}, \%meta_data, $variant_data );
 
-&detect_unexpected( \%data, \%meta_data, \%sample );
-
-
+&detect_unexpected( \%data, \%meta_data, \%sample, $allele_freq );
 
 
 
 ########################
 
+
 sub detect_unexpected{
-    my( $data, $meta_data, $sample_data ) = @_;
+    my( $data, $meta_data, $sample_data, $allele_freq ) = @_;
 
     my (%dist, %seen);
     foreach my $samp1 ( keys %$meta_data ) {
@@ -50,7 +49,7 @@ sub detect_unexpected{
 	$seen{$samp1} = 1;
 
 	# If sex was annotated, check if predicted sex agrees.
-	if ($meta_data->{$samp1}->{sex}) {
+	if ($meta_data->{$samp1}->{sex} and $sample_data->{$name1}->{sex}->{pred}) {
 	    my $anno_sex = $meta_data->{$samp1}->{sex};
 	    my $pred_sex = $sample_data->{$name1}->{sex}->{pred};
 	    print "UNEXPECTED SEX: $name1 (Predicted:$pred_sex, Annotated:$anno_sex)\n" if ($anno_sex ne "-" and $anno_sex ne $pred_sex);
@@ -88,11 +87,11 @@ sub detect_unexpected{
 			       $name1, $name2,100*(1-$dist{$name1}->{$name2});
 		    }
 		}
-		
 	    }
 	}
     }
 }
+
 
 
 sub distance{
@@ -100,8 +99,8 @@ sub distance{
 
     my ( $identical, $tot ) = ( 0, 0 );
     foreach my $loc (keys %$data) {
-	if( defined($data->{$loc}->{samples}->{$id1}->{gt}) and defined($data->{$loc}->{samples}->{$id2}->{gt}) ) {
-	    $identical++ if $data->{$loc}->{samples}->{$id1}->{gt} eq $data->{$loc}->{samples}->{$id2}->{gt};
+	if( defined($data->{$loc}->{samples}->{$id1}->{basecall}) and defined($data->{$loc}->{samples}->{$id2}->{basecall}) ) {
+	    $identical++ if $data->{$loc}->{samples}->{$id1}->{basecall} eq $data->{$loc}->{samples}->{$id2}->{basecall};
 	    $tot++;
 	}
     }
@@ -113,10 +112,11 @@ sub distance{
 }
 
 
+
 sub read_bed{
     my $bed = shift;
     open( BED, $bed );
-    my (%var, %chr);
+    my (%var, %chr, %additional);
     while( <BED> ) {
 	chomp;
 	my @a = split /\t/;
@@ -127,9 +127,15 @@ sub read_bed{
 	else {
 	    $var{$a[0].":".$a[2]} = $a[0].":".$a[2];
 	}
+
+	if ($a[4]) {
+	    $additional{$a[0].":".$a[2]} = $a[4];
+	}
     }
-    return( \%var, \%chr );
+
+    return( \%var, \%chr, \%additional );
 }
+
 
 
 sub print_genotype_table{
@@ -150,7 +156,7 @@ sub print_genotype_table{
 	print GT $snp_id if ! $opt{long};
 
 	foreach my $sid ( sort keys %{ $snp_data->{$loc}->{samples} } ) {
-	    my $genotype = $snp_data->{$loc}->{samples}->{$sid}->{gt};
+	    my $genotype = $snp_data->{$loc}->{samples}->{$sid}->{basecall};
 
 	    if( $opt{long} ) {
 		print GT "$sid\t$sid\t".$snp_id."\t". 
@@ -164,14 +170,12 @@ sub print_genotype_table{
 	print GT "\n" if ! $opt{long};
 	$tot_callable += $snp_data->{$loc}->{Ncallable};
 	$tot_sites    += $snp_data->{$loc}->{Ntotal};
-	$HW_pass      += $snp_data->{$loc}->{HW};
 	$tot_loc      ++;
     }   
     close GT;
 
     open (STATS, ">".$out.".stats");
-    printf STATS "Average callability: %.2f%%\nSites in H-W equilibrium: %d / %d\n", 100*($tot_callable/$tot_sites),
-                                                                                     $HW_pass, $tot_loc;
+    printf STATS "Average callability: %.2f%%\n", 100*($tot_callable/$tot_sites);
     close STATS;
 
     # Output file with sex prediction
@@ -185,6 +189,7 @@ sub print_genotype_table{
 }
 
 
+
 sub plink_gt{
     my $bc = shift;
     return "0\t0" if !defined($bc) or $bc eq "unclear" or $bc eq "lowdata" ;
@@ -192,6 +197,7 @@ sub plink_gt{
     my ($a1, $a2) = split /\//, $bc;
     return "$a1\t$a2";
 }
+
  
 
 sub determine_sex{
@@ -247,86 +253,6 @@ sub determine_sex{
 }
 
 
-sub do_genotyping{
-    my( $data, $loci ) = @_;
-
-    foreach my $loc ( keys %$loci ) {
-	my $num_samples;
-
-	# SNP loci: Do base calling
-	my %gt_cnt;
-	foreach my $sid (sort keys %{ $data->{$loc}->{samples} }) {
-    
-	    # Get base frequencies for the locus into %f 
-	    my %f = %{ $data->{$loc}->{samples}->{$sid}->{bases} };
-
-	    # Get read depth
-	    my $tot = $data->{$loc}->{samples}->{$sid}->{depth};
-
-	    # Fint most common and second most common base
-	    my ($max, $second) = ( large(\%f, 1), large(\%f, 2) );
-
-	    # Require a depth of at least 6 reads in the locus
-	    my $gt;
-	    if ($tot >= 6) {
-		my $ap = ( $f{$max} - $f{$second} ) / $tot;
-	
-		if ($ap < 0.6) { # Heterozygote
-		    $gt = join "/", sort( $max,$second );
-		}
-		elsif ($ap > 0.9) { # Homozygote
-		    $gt = $max;
-		}
-		else {
-		    $gt = 'unclear';
-		}
-	    }
-	    else {
-		$gt = 'lowdata';
-	    }
-	    $data{$loc}->{samples}->{$sid}->{basecall} = $gt;
-	    $gt_cnt{$gt}++ if $gt ne "unclear" and $gt ne "lowdata";
-	    $num_samples++;
-	}
-	$data->{$loc}->{Ntotal} = $num_samples;
-
-	# Skipping tri-allelic sites
-	if (keys %gt_cnt > 3) {
-	    print STDERR "Skipping $loc: More than more than 2 alleles detected!\n";
-	    next;
-	}
-
-	# Assign genotypes to 0,1,2 (0 = common homozygote, 1 = heterozygote, 2 = rare homozygote)
-	my $first = 1;
-	my %num;
-	foreach my $gtype (sort {$gt_cnt{$b} <=> $gt_cnt{$a}} keys %gt_cnt) {
-	    if ($gtype =~ /\//) {
-		$num{$gtype} = 1;
-	    }
-	    else {
-		$num{$gtype} = 0 if $first;
-		$num{$gtype} = 2 if !$first;
-		$first = 0;
-	    }
-	    $gt_cnt{ $num{$gtype} } = $gt_cnt{ $gtype };
-	}
-
-	# Add 0,1,2 genotypes to hash
-	foreach my $sid (keys %{$data->{$loc}->{samples}}) {
-	    my $call = $data->{$loc}->{samples}->{$sid}->{basecall};
-	    if ($call ne "unclear" and $call ne "lowdata") {
-		$data->{$loc}->{samples}->{$sid}->{gt} = $num{ $call }
-	    }
-	}
-
-	# Check for Hardy-Weinberg equilibrium
-	my ($AA, $AB, $BB) = ( ($gt_cnt{0} or 0), ($gt_cnt{1} or 0), ($gt_cnt{2} or 0) );
-	$data{$loc}->{HW}        = HW_chi2test( $AA, $AB, $BB );
-	$data{$loc}->{Ncallable} = $AA + $AB + $BB;
-	$data{$loc}->{MAF}       = ( $AB + 2 * $BB ) / 2 * ($AA+$AB+$BB);
-    }   
-}
-
 
 # Run mpileup for a single chromosome in a thread.
 sub mpileup_thread {
@@ -336,6 +262,7 @@ sub mpileup_thread {
 	    " > $out.$chr 2> $opt{out}.mpileup.$chr.log" );
     threads->exit();
 }
+
 
 
 # Run mpilup on bams and count number of A, C, G and Ts in each position.
@@ -398,9 +325,108 @@ sub get_base_freqs_from_bams{
 	}
     }
     close PILE;
-
     return %frq
 }
+
+
+
+sub do_genotyping{
+    my( $data, $loci, $allele_freq ) = @_;
+
+    foreach my $loc ( keys %$loci ) {
+	my ($num_samples, $num_callable) = (0, 0);
+
+	# SNP loci: Do base calling
+	my %gt_cnt;
+	foreach my $sid (sort keys %{ $data->{$loc}->{samples} }) {
+    
+	    # Get base frequencies for the locus into %f 
+	    my %f = %{ $data->{$loc}->{samples}->{$sid}->{bases} };
+
+	    # Get read depth
+	    my $tot = $data->{$loc}->{samples}->{$sid}->{depth};
+
+	    # Find most common and second most common base
+	    my ($max, $second) = ( large(\%f, 1), large(\%f, 2) );
+
+	    # Require a depth of at least 6 reads in the locus
+	    my $gt;
+	    if ($tot >= 6) {
+		my $ap = ( $f{$max} - $f{$second} ) / $tot;
+	
+		if ($ap < 0.6) { # Heterozygote
+		    $gt = join "/", sort( $max,$second );
+		}
+		elsif ($ap > 0.9) { # Homozygote
+		    $gt = $max;
+		}
+		else {
+		    $gt = 'unclear';
+		}
+	    }
+	    else {
+		$gt = 'lowdata';
+	    }
+	    if ($gt ne "unclear" and $gt ne "lowdata") {
+		$data->{$loc}->{samples}->{$sid}->{basecall} = $gt;
+		$gt_cnt{$gt}++;
+		$num_callable++;
+	    }
+	    else {
+		$data->{$loc}->{samples}->{$sid}->{uncalled} = $gt;
+	    }
+	    $num_samples++;
+	}
+	$data->{$loc}->{Ntotal}    = $num_samples;
+	$data->{$loc}->{Ncallable} = $num_callable;
+
+
+	# Skipping tri-allelic loci
+	if( keys %gt_cnt > 3 ) {
+	    print STDERR "Skipping $loc: More than more than 2 alleles detected!\n";
+	    $data->{$loc}->{skip} = 1;
+	    next;
+	}
+
+	# Skip loci that are not callable in any sample
+	if( $num_callable < 1 ) {
+	    print STDERR "Skipping $loc: No samples callable!\n";
+	    $data->{$loc}->{skip} = 1;
+	    next;
+	}
+
+	# If alt allele frequency was specified and --obsaf option was not used,
+	# simply add it to the locus hash.
+	if( $allele_freq->{ $loc } and !$opt{ obsaf } ) {
+	    my( $alt, $alt_af ) = split /\//, $allele_freq->{ $loc };
+	    $data->{$loc}->{alt} = $alt;
+	    $data->{$loc}->{alt_af} = $alt_af;
+	}
+	# Otherwise calculate an observed alt allele frequency
+	else {
+	    my $first = 1;
+	    my ($rare_hom, $het) = (0, 0);
+	    foreach my $gtype (sort {$gt_cnt{$a} <=> $gt_cnt{$b}} keys %gt_cnt) {
+		if ($gtype =~ /\//) {
+		    $het = $gtype;
+		}
+		else {
+		    $rare_hom = $gtype if $first;
+		    $first = 0;
+		}
+	    }
+
+	    # If all samples are heterzygotic, assign one of the alleles as rare.
+	    $rare_hom = (split /\//, $het)[0] if !$rare_hom;
+
+	    my ($AB, $BB) = ( ($gt_cnt{$het} or 0), ($gt_cnt{$rare_hom} or 0) );
+	    $data->{$loc}->{alt} = $rare_hom;
+	    $data->{$loc}->{alt_af} = ( $AB + 2 * $BB ) / ( 2 * $num_callable );
+	}
+    }
+}
+
+
 
 # Merge a number of files, similar to 'cat file1 file2 > merged'
 sub merge_files{
@@ -415,6 +441,7 @@ sub merge_files{
     }
     close OUT;
 }
+
 
 
 # FIXME: Use qual string and parse base string properly...
@@ -433,11 +460,13 @@ sub count_bases{
 }
 
 
+
 # Parse and check command line options
 sub get_options{
     my %opt = ( 'bed' => $DEFAULT_SNPBED, 'bedxy' => $DEFAULT_XYBED );
     GetOptions( \%opt, 'bam=s', 'bed=s', 'bedxy=s', 'nocheck', 'overwrite', 'out=s', 
-		'thread', 'long', 'position' );
+		'thread', 'long', 'position', 'obsaf' );
+
     error( "Parameter --bam required", 1, 1 ) unless $opt{bam};
     error( "Bed file $opt{bed} does not exist.", 1 ) if $opt{bed} and !-s $opt{bed};
 
@@ -455,6 +484,7 @@ sub get_options{
     }
     return %opt;
 }
+
 
 
 # Display help text
@@ -478,10 +508,13 @@ sub display_usage{
 	  "                Default: OFF\n".
 	  "   --bedxy      Extra bed file for sex determination. Set to 'none' if not desired.\n".
 	  "                Default: $DEFAULT_XYBED\n".
-	  "   --thread     Run in threaded mode.\n\n";
-
+	  "   --thread     Run in threaded mode.\n";
+	  "   --obsaf      Use allele frequencies from data for statistics.\n".
+          "                Default: OFF if BED files contains allle frequencies, otherwise ON\n\n";
 
 }
+
+
 
 # Get BAM file names from file mask or metadata file.
 sub get_bampaths{
@@ -521,6 +554,7 @@ sub get_bampaths{
 }
 
 
+
 # Parse meta data file
 sub read_sample_metadata{
     my($fn, $nocheck ) = @_;
@@ -551,36 +585,6 @@ sub read_sample_metadata{
     return %files;
 }
 
-
-# Perform chi2test for Hardy-Weinberg equilibrium
-sub HW_chi2test {
-    my ($AA, $AB, $BB) = @_;
-    my $CHI2_CUTOFF = 3.84;
-
-    return 0 if $AA == 0 or $BB == 0;
-
-    # Number of genotyped individuals
-    my $N = $AA + $AB + $BB;
-
-    # Observed allele frequencies (p = A, q = B)
-    my $p = ($AA*2 + $AB) / (2*$N);
-    my $q = ($BB*2 + $AB) / (2*$N);
-
-    # Expected equilibrium genotype frequencies
-    my $eAA = ($p ** 2) * $N;
-    my $eBB = ($q ** 2) * $N;
-    my $eAB = (2 * $p * $q) * $N;
-    
-    # Chi-square
-    my $chi2 = ($AA-$eAA)**2 / $eAA +
-	($BB-$eBB)**2 / $eBB +
-	($AB-$eAB)**2 / $eAB;
-    
-    if( $chi2 < $CHI2_CUTOFF ) {
-	return 1;
-    }
-    return 0;
-}
 
 
 # Check if all the chromosome names in the BED file are present in the BAM
@@ -614,6 +618,7 @@ sub matching_chr_names {
 }
 
 
+
 # Print error message and quit program
 sub error{
     my ($msg, $error_code, $print_usage) = @_;
@@ -621,6 +626,7 @@ sub error{
     &display_usage if $print_usage;
     exit $error_code;
 }
+
 
 
 # Sum up values of an array
@@ -642,6 +648,7 @@ sub large {
     }
     die "Large outside of array";
 }
+
 
 
 # Calculate the average of values in an array
