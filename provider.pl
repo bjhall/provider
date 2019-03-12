@@ -3,10 +3,12 @@ use strict;
 use threads;
 use Getopt::Long;
 use Data::Dumper;
+use File::Basename;
+use lib dirname (__FILE__);
 
 my $SAMTOOLS_PATH = "samtools";
-my $DEFAULT_SNPBED = "HPA_1000G_final_38.bed";
-my $DEFAULT_XYBED  = "xy_38.bed";
+my $DEFAULT_SNPBED = dirname($0)."/HPA_1000G_final_38.bed";
+my $DEFAULT_XYBED  = dirname($0)."/xy_38.bed";
 
 my %opt = &get_options;
 my %meta_data = &get_bampaths( $opt{bam}, $opt{nocheck} );
